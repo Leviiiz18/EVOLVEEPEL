@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EPL Match Predictor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <style>
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .card-shadow {
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        .team-card {
+            transition: all 0.3s ease;
+        }
+        .team-card:hover {
+            transform: translateY(-5px);
+        }
+        .loading-spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .stat-input {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .stat-input:focus {
+            background: rgba(255,255,255,0.2);
+            border-color: rgba(255,255,255,0.4);
+        }
+        .prediction-card {
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(20px);
+        }
+    </style>
+</head>
+<body class="min-h-screen gradient-bg overflow-x-hidden">
+    <!-- Header -->
+    <header class="py-8 text-center">
+        <div class="container mx-auto px-4">
+            <h1 class="text-5xl font-bold text-white mb-2 opacity-0" id="title">⚽ EPL Match Predictor</h1>
+            <p class="text-xl text-white opacity-75 opacity-0" id="subtitle">Predict Premier League match outcomes using AI</p>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 pb-12">
+        <!-- Team Selection -->
+        <div class="max-w-4xl mx-auto mb-12">
+            <div class="grid md:grid-cols-2 gap-8">
+                <!-- Home Team -->
+                <div class="team-card bg-white/20 backdrop-blur-lg rounded-2xl p-6 opacity-0" id="home-team-card">
+                    <h3 class="text-2xl font-bold text-white mb-4 text-center">🏠 Home Team</h3>
+                    <select id="home-team" class="w-full p-4 rounded-xl bg-white/30 backdrop-blur-lg border border-white/20 text-white text-lg focus:outline-none focus:ring-2 focus:ring-white/50">
+                        <option value="">Select Home Team</option>
+                    </select>
+                </div>
+
+                <!-- Away Team -->
+                <div class="team-card bg-white/20 backdrop-blur-lg rounded-2xl p-6 opacity-0" id="away-team-card">
+                    <h3 class="text-2xl font-bold text-white mb-4 text-center">✈️ Away Team</h3>
+                    <select id="away-team" class="w-full p-4 rounded-xl bg-white/30 backdrop-blur-lg border border-white/20 text-white text-lg focus:outline-none focus:ring-2 focus:ring-white/50">
+                        <option value="">Select Away Team</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Input -->
+        <div class="max-w-6xl mx-auto mb-12">
+            <div class="bg-white/20 backdrop-blur-lg rounded-2xl p-8 card-shadow opacity-0" id="stats-card">
+                <h3 class="text-3xl font-bold text-white mb-6 text-center">📊 Match Statistics</h3>
+                <p class="text-white/80 text-center mb-8">Enter 18 statistical features for match prediction</p>
+                
+                <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4" id="stats-container">
+                    <!-- Stats inputs will be generated here -->
+                </div>
+
+                <div class="text-center mt-8">
+                    <button id="predict-btn" class="bg-gradient-to-r from-green-400 to-blue-500 hover:from-green-500 hover:to-blue-600 text-white font-bold py-4 px-8 rounded-xl text-lg transition-all duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed">
+                        🔮 Predict Match
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Prediction Result -->
+        <div class="max-w-4xl mx-auto">
+            <div class="prediction-card rounded-2xl p-8 card-shadow opacity-0 transform translate-y-8" id="result-card">
+                <div id="loading" class="text-center hidden">
+                    <div class="loading-spinner mx-auto mb-4"></div>
+                    <p class="text-gray-600">Analyzing match data...</p>
+                </div>
+
+                <div id="prediction-result" class="hidden">
+                    <h3 class="text-3xl font-bold text-gray-800 mb-6 text-center">🏆 Match Prediction</h3>
+                    
+                    <div class="grid md:grid-cols-3 gap-6 mb-8">
+                        <div class="text-center">
+                            <div class="bg-blue-100 rounded-xl p-4 mb-2">
+                                <h4 class="text-lg font-semibold text-blue-800" id="home-team-name">Home Team</h4>
+                                <div class="text-4xl font-bold text-blue-600" id="home-goals">0</div>
+                            </div>
+                        </div>
+
+                        <div class="text-center flex items-center justify-center">
+                            <div class="text-6xl font-bold text-gray-400">VS</div>
+                        </div>
+
+                        <div class="text-center">
+                            <div class="bg-red-100 rounded-xl p-4 mb-2">
+                                <h4 class="text-lg font-semibold text-red-800" id="away-team-name">Away Team</h4>
+                                <div class="text-4xl font-bold text-red-600" id="away-goals">0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="text-center">
+                        <div class="bg-gradient-to-r from-purple-100 to-pink-100 rounded-xl p-6">
+                            <h4 class="text-xl font-semibold text-gray-800 mb-2">Winner</h4>
+                            <div class="text-3xl font-bold text-purple-600" id="winner">TBD</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="error-message" class="hidden text-center text-red-600">
+                    <div class="text-6xl mb-4">❌</div>
+                    <p class="text-xl font-semibold">Prediction Error</p>
+                    <p class="text-gray-600 mt-2" id="error-text"></p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // API Configuration
+        const API_BASE_URL = 'http://localhost:5000';
+        
+        // Teams data
+        let teams = [];
+        
+        // DOM Elements
+        const homeTeamSelect = document.getElementById('home-team');
+        const awayTeamSelect = document.getElementById('away-team');
+        const predictBtn = document.getElementById('predict-btn');
+        const resultCard = document.getElementById('result-card');
+        const loading = document.getElementById('loading');
+        const predictionResult = document.getElementById('prediction-result');
+        const errorMessage = document.getElementById('error-message');
+        
+        // Initialize the app
+        async function init() {
+            // Animate header
+            gsap.timeline()
+                .to('#title', { opacity: 1, y: 0, duration: 1, ease: 'power2.out' })
+                .to('#subtitle', { opacity: 1, y: 0, duration: 1, ease: 'power2.out' }, '-=0.5');
+            
+            // Animate cards
+            gsap.timeline({ delay: 0.5 })
+                .to('#home-team-card', { opacity: 1, y: 0, duration: 0.8, ease: 'power2.out' })
+                .to('#away-team-card', { opacity: 1, y: 0, duration: 0.8, ease: 'power2.out' }, '-=0.6')
+                .to('#stats-card', { opacity: 1, y: 0, duration: 0.8, ease: 'power2.out' }, '-=0.4');
+            
+            // Load teams and generate stats inputs
+            await loadTeams();
+            generateStatsInputs();
+            
+            // Add event listeners
+            predictBtn.addEventListener('click', handlePredict);
+        }
+        
+        // Load teams from API
+        async function loadTeams() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/teams`);
+                if (!response.ok) throw new Error('Failed to load teams');
+                
+                const data = await response.json();
+                teams = data.teams;
+                
+                // Populate select options
+                teams.forEach(team => {
+                    const homeOption = document.createElement('option');
+                    homeOption.value = team;
+                    homeOption.textContent = team;
+                    homeTeamSelect.appendChild(homeOption);
+                    
+                    const awayOption = document.createElement('option');
+                    awayOption.value = team;
+                    awayOption.textContent = team;
+                    awayTeamSelect.appendChild(awayOption);
+                });
+                
+            } catch (error) {
+                console.error('Error loading teams:', error);
+                // Fallback teams
+                teams = [
+                    "Manchester City", "Arsenal", "Manchester United", "Newcastle United",
+                    "Liverpool", "Brighton & Hove Albion", "Aston Villa", "Tottenham Hotspur",
+                    "Brentford", "Fulham"
+                ];
+                
+                teams.forEach(team => {
+                    const homeOption = document.createElement('option');
+                    homeOption.value = team;
+                    homeOption.textContent = team;
+                    homeTeamSelect.appendChild(homeOption);
+                    
+                    const awayOption = document.createElement('option');
+                    awayOption.value = team;
+                    awayOption.textContent = team;
+                    awayTeamSelect.appendChild(awayOption);
+                });
+            }
+        }
+        
+        // Generate 18 stats input fields
+        function generateStatsInputs() {
+            const statsContainer = document.getElementById('stats-container');
+            const statLabels = [
+                'Shots', 'Shots on Target', 'Possession %', 'Passes', 'Pass Accuracy %',
+                'Fouls', 'Yellow Cards', 'Red Cards', 'Corners', 'Crosses',
+                'Touches', 'Tackles', 'Interceptions', 'Aerials Won', 'Clearances',
+                'Offsides', 'Saves', 'Distance Covered'
+            ];
+            
+            for (let i = 0; i < 18; i++) {
+                const inputDiv = document.createElement('div');
+                inputDiv.className = 'opacity-0';
+                inputDiv.innerHTML = `
+                    <label class="block text-white text-sm font-medium mb-2">${statLabels[i] || `Stat ${i+1}`}</label>
+                    <input 
+                        type="number" 
+                        id="stat-${i}" 
+                        class="stat-input w-full p-3 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-white/50"
+                        placeholder="0"
+                        step="0.1"
+                        min="0"
+                    />
+                `;
+                statsContainer.appendChild(inputDiv);
+                
+                // Animate input appearance
+                gsap.to(inputDiv, {
+                    opacity: 1,
+                    y: 0,
+                    duration: 0.5,
+                    delay: i * 0.05,
+                    ease: 'power2.out'
+                });
+            }
+        }
+        
+        // Handle prediction
+        async function handlePredict() {
+            const homeTeam = homeTeamSelect.value;
+            const awayTeam = awayTeamSelect.value;
+            
+            // Validation
+            if (!homeTeam || !awayTeam) {
+                showError('Please select both home and away teams');
+                return;
+            }
+            
+            if (homeTeam === awayTeam) {
+                showError('Home and away teams cannot be the same');
+                return;
+            }
+            
+            // Collect stats
+            const stats = [];
+            for (let i = 0; i < 18; i++) {
+                const statInput = document.getElementById(`stat-${i}`);
+                const value = parseFloat(statInput.value) || 0;
+                stats.push(value);
+            }
+            
+            // Show loading and animate result card
+            showLoading();
+            gsap.to(resultCard, {
+                opacity: 1,
+                y: 0,
+                duration: 0.8,
+                ease: 'power2.out'
+            });
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/predict`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        home_team: homeTeam,
+                        away_team: awayTeam,
+                        stats: stats
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Prediction failed');
+                }
+                
+                const data = await response.json();
+                showPrediction(data);
+                
+            } catch (error) {
+                console.error('Prediction error:', error);
+                showError(error.message || 'Failed to get prediction');
+            }
+        }
+        
+        // Show loading state
+        function showLoading() {
+            loading.classList.remove('hidden');
+            predictionResult.classList.add('hidden');
+            errorMessage.classList.add('hidden');
+        }
+        
+        // Show prediction result
+        function showPrediction(data) {
+            loading.classList.add('hidden');
+            errorMessage.classList.add('hidden');
+            
+            // Update result data
+            document.getElementById('home-team-name').textContent = data.home_team;
+            document.getElementById('away-team-name').textContent = data.away_team;
+            document.getElementById('home-goals').textContent = data.prediction.predicted_home_goals;
+            document.getElementById('away-goals').textContent = data.prediction.predicted_away_goals;
+            document.getElementById('winner').textContent = data.prediction.winner;
+            
+            // Animate result appearance
+            predictionResult.classList.remove('hidden');
+            gsap.fromTo(predictionResult.children, 
+                { opacity: 0, y: 20 },
+                { opacity: 1, y: 0, duration: 0.6, stagger: 0.1, ease: 'power2.out' }
+            );
+        }
+        
+        // Show error message
+        function showError(message) {
+            loading.classList.add('hidden');
+            predictionResult.classList.add('hidden');
+            
+            document.getElementById('error-text').textContent = message;
+            errorMessage.classList.remove('hidden');
+            
+            // Animate result card appearance if not visible
+            if (resultCard.style.opacity === '0' || !resultCard.style.opacity) {
+                gsap.to(resultCard, {
+                    opacity: 1,
+                    y: 0,
+                    duration: 0.8,
+                    ease: 'power2.out'
+                });
+            }
+        }
+        
+        // Initialize app when DOM is loaded
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
