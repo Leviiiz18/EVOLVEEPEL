@@ -1,0 +1,932 @@
+import pandas as pd
+import numpy as np
+import neat
+import os
+import pickle
+import matplotlib.pyplot as plt
+import networkx as nx
+from sklearn.metrics import f1_score, accuracy_score, classification_report
+from sklearn.preprocessing import StandardScaler, LabelEncoder, RobustScaler
+from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.feature_selection import SelectKBest, f_classif
+from collections import defaultdict, Counter
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
+class EnhancedFootballPredictor:
+    def __init__(self, csv_path='England CSV.csv'):
+        self.df = None
+        self.scaler = RobustScaler()  # More robust to outliers
+        self.label_encoder = LabelEncoder()
+        self.team_encoder = LabelEncoder()
+        self.config = None
+        self.best_genome = None
+        self.best_net = None
+        self.class_weights = None
+        self.feature_selector = SelectKBest(f_classif, k=20)  # Feature selection
+        self.team_strengths = {}
+        self.season_data = {}
+        
+        # Enhanced feature names
+        self.feature_names = [
+            'home_form_3', 'away_form_3', 'home_form_6', 'away_form_6',
+            'home_goals_scored_avg', 'home_goals_conceded_avg',
+            'away_goals_scored_avg', 'away_goals_conceded_avg',
+            'h2h_home_advantage', 'h2h_recent',
+            'home_shots_avg', 'away_shots_avg', 'home_sot_avg', 'away_sot_avg',
+            'home_wins_ratio', 'away_wins_ratio', 'home_draws_ratio', 'away_draws_ratio',
+            'goal_difference_home', 'goal_difference_away',
+            'home_clean_sheets_ratio', 'away_clean_sheets_ratio',
+            'home_btts_ratio', 'away_btts_ratio',
+            'home_strength', 'away_strength', 'strength_difference',
+            'home_recent_form', 'away_recent_form',
+            'home_home_form', 'away_away_form',  # Home/away specific form
+            'home_scoring_form', 'away_scoring_form',
+            'home_defensive_form', 'away_defensive_form',
+            'match_importance', 'season_stage'
+        ]
+        self.load_and_preprocess_data(csv_path)
+        self.calculate_team_strengths()
+    
+    def load_and_preprocess_data(self, csv_path):
+        """Load and preprocess the football data with enhanced cleaning"""
+        try:
+            self.df = pd.read_csv(csv_path, parse_dates=['Date'])
+            self.df = self.df.sort_values('Date').reset_index(drop=True)
+            
+            # Enhanced data cleaning
+            self.df = self.df.dropna(subset=['FTH Goals', 'FTA Goals', 'FT Result'])
+            
+            # Fill missing shot data with league averages
+            avg_home_shots = self.df['H Shots'].median() if 'H Shots' in self.df.columns else 12
+            avg_away_shots = self.df['A Shots'].median() if 'A Shots' in self.df.columns else 10
+            avg_home_sot = self.df['H SOT'].median() if 'H SOT' in self.df.columns else 4
+            avg_away_sot = self.df['A SOT'].median() if 'A SOT' in self.df.columns else 3
+            
+            self.df['H Shots'] = self.df.get('H Shots', avg_home_shots).fillna(avg_home_shots)
+            self.df['A Shots'] = self.df.get('A Shots', avg_away_shots).fillna(avg_away_shots)
+            self.df['H SOT'] = self.df.get('H SOT', avg_home_sot).fillna(avg_home_sot)
+            self.df['A SOT'] = self.df.get('A SOT', avg_away_sot).fillna(avg_away_sot)
+            
+            # Extract season information
+            self.df['Season'] = self.df['Date'].apply(
+                lambda x: f"{x.year}/{x.year+1}" if x.month >= 7 else f"{x.year-1}/{x.year}"
+            )
+            
+            # Encode teams
+            all_teams = list(set(self.df['HomeTeam'].tolist() + self.df['AwayTeam'].tolist()))
+            self.team_encoder.fit(all_teams)
+            
+            print(f"Loaded {len(self.df)} matches with {len(all_teams)} unique teams")
+            print(f"Date range: {self.df['Date'].min()} to {self.df['Date'].max()}")
+            
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            raise
+    
+    def calculate_team_strengths(self):
+        """Calculate overall team strengths using ELO-like rating system"""
+        print("Calculating team strengths...")
+        
+        # Initialize ratings
+        teams = set(self.df['HomeTeam'].tolist() + self.df['AwayTeam'].tolist())
+        ratings = {team: 1500 for team in teams}  # Start with 1500 ELO
+        
+        for _, row in self.df.iterrows():
+            home_team, away_team = row['HomeTeam'], row['AwayTeam']
+            result = row['FT Result']
+            
+            # Current ratings
+            home_rating = ratings[home_team]
+            away_rating = ratings[away_team]
+            
+            # Expected scores (with home advantage)
+            home_expected = 1 / (1 + 10**((away_rating - home_rating - 50) / 400))
+            away_expected = 1 - home_expected
+            
+            # Actual scores
+            if result == 'H':
+                home_actual, away_actual = 1, 0
+            elif result == 'A':
+                home_actual, away_actual = 0, 1
+            else:
+                home_actual, away_actual = 0.5, 0.5
+            
+            # Update ratings (K-factor of 30)
+            K = 30
+            ratings[home_team] += K * (home_actual - home_expected)
+            ratings[away_team] += K * (away_actual - away_expected)
+        
+        # Normalize ratings to 0-1 range
+        min_rating = min(ratings.values())
+        max_rating = max(ratings.values())
+        
+        for team in ratings:
+            ratings[team] = (ratings[team] - min_rating) / (max_rating - min_rating)
+        
+        self.team_strengths = ratings
+    
+    def calculate_enhanced_team_metrics(self, team, date, matches_back=10):
+        """Calculate comprehensive team metrics with multiple timeframes"""
+        team_matches = self.df[
+            ((self.df['HomeTeam'] == team) | (self.df['AwayTeam'] == team)) & 
+            (self.df['Date'] < date)
+        ].sort_values('Date', ascending=False)
+        
+        if len(team_matches) == 0:
+            return self._get_default_metrics()
+        
+        # Calculate metrics for different timeframes
+        metrics = {}
+        
+        for timeframe, games in [('recent', 3), ('short', 6), ('medium', 10)]:
+            subset = team_matches.head(games)
+            if len(subset) == 0:
+                continue
+                
+            points = goals_scored = goals_conceded = shots = sot = 0
+            wins = draws = losses = clean_sheets = btts = 0
+            home_games = away_games = 0
+            
+            for _, row in subset.iterrows():
+                is_home = row['HomeTeam'] == team
+                
+                if is_home:
+                    home_games += 1
+                    goals_scored += row['FTH Goals']
+                    goals_conceded += row['FTA Goals']
+                    shots += row['H Shots']
+                    sot += row['H SOT']
+                    
+                    if row['FT Result'] == 'H':
+                        points += 3; wins += 1
+                    elif row['FT Result'] == 'D':
+                        points += 1; draws += 1
+                    else:
+                        losses += 1
+                        
+                    if row['FTA Goals'] == 0:
+                        clean_sheets += 1
+                else:
+                    away_games += 1
+                    goals_scored += row['FTA Goals']
+                    goals_conceded += row['FTH Goals']
+                    shots += row['A Shots']
+                    sot += row['A SOT']
+                    
+                    if row['FT Result'] == 'A':
+                        points += 3; wins += 1
+                    elif row['FT Result'] == 'D':
+                        points += 1; draws += 1
+                    else:
+                        losses += 1
+                        
+                    if row['FTH Goals'] == 0:
+                        clean_sheets += 1
+                
+                # Both teams to score
+                if row['FTH Goals'] > 0 and row['FTA Goals'] > 0:
+                    btts += 1
+            
+            num_matches = len(subset)
+            if num_matches > 0:
+                metrics[f'{timeframe}_form'] = points / (num_matches * 3)
+                metrics[f'{timeframe}_goals_scored'] = goals_scored / num_matches
+                metrics[f'{timeframe}_goals_conceded'] = goals_conceded / num_matches
+                metrics[f'{timeframe}_shots'] = shots / num_matches
+                metrics[f'{timeframe}_sot'] = sot / num_matches
+                metrics[f'{timeframe}_wins_ratio'] = wins / num_matches
+                metrics[f'{timeframe}_draws_ratio'] = draws / num_matches
+                metrics[f'{timeframe}_clean_sheets'] = clean_sheets / num_matches
+                metrics[f'{timeframe}_btts'] = btts / num_matches
+                metrics[f'{timeframe}_goal_diff'] = (goals_scored - goals_conceded) / num_matches
+        
+        # Home/Away specific metrics
+        home_matches = team_matches[team_matches['HomeTeam'] == team].head(5)
+        away_matches = team_matches[team_matches['AwayTeam'] == team].head(5)
+        
+        metrics['home_specific_form'] = self._calculate_venue_form(home_matches, team, True)
+        metrics['away_specific_form'] = self._calculate_venue_form(away_matches, team, False)
+        
+        return metrics
+    
+    def _calculate_venue_form(self, matches, team, is_home_venue):
+        """Calculate venue-specific form"""
+        if len(matches) == 0:
+            return 0.5
+            
+        points = 0
+        for _, row in matches.iterrows():
+            if is_home_venue:
+                if row['FT Result'] == 'H':
+                    points += 3
+                elif row['FT Result'] == 'D':
+                    points += 1
+            else:
+                if row['FT Result'] == 'A':
+                    points += 3
+                elif row['FT Result'] == 'D':
+                    points += 1
+        
+        return points / (len(matches) * 3)
+    
+    def _get_default_metrics(self):
+        """Default metrics for teams with no history"""
+        return {
+            'recent_form': 0.5, 'short_form': 0.5, 'medium_form': 0.5,
+            'recent_goals_scored': 1.5, 'short_goals_scored': 1.5, 'medium_goals_scored': 1.5,
+            'recent_goals_conceded': 1.5, 'short_goals_conceded': 1.5, 'medium_goals_conceded': 1.5,
+            'recent_shots': 12, 'short_shots': 12, 'medium_shots': 12,
+            'recent_sot': 4, 'short_sot': 4, 'medium_sot': 4,
+            'recent_wins_ratio': 0.33, 'short_wins_ratio': 0.33, 'medium_wins_ratio': 0.33,
+            'recent_draws_ratio': 0.33, 'short_draws_ratio': 0.33, 'medium_draws_ratio': 0.33,
+            'recent_clean_sheets': 0.3, 'short_clean_sheets': 0.3, 'medium_clean_sheets': 0.3,
+            'recent_btts': 0.5, 'short_btts': 0.5, 'medium_btts': 0.5,
+            'recent_goal_diff': 0, 'short_goal_diff': 0, 'medium_goal_diff': 0,
+            'home_specific_form': 0.5, 'away_specific_form': 0.5
+        }
+    
+    def calculate_enhanced_h2h_metrics(self, home_team, away_team, date, matches_back=10):
+        """Enhanced head-to-head metrics"""
+        h2h_matches = self.df[
+            (((self.df['HomeTeam'] == home_team) & (self.df['AwayTeam'] == away_team)) | 
+             ((self.df['HomeTeam'] == away_team) & (self.df['AwayTeam'] == home_team))) & 
+            (self.df['Date'] < date)
+        ].sort_values('Date', ascending=False)
+        
+        if len(h2h_matches) == 0:
+            return 0.5, 0.5
+        
+        all_matches = h2h_matches.head(matches_back)
+        recent_matches = h2h_matches.head(5)
+        
+        def calc_advantage(matches):
+            if len(matches) == 0:
+                return 0.5
+            
+            home_advantage = 0
+            for _, row in matches.iterrows():
+                if row['HomeTeam'] == home_team:
+                    if row['FT Result'] == 'H':
+                        home_advantage += 1
+                    elif row['FT Result'] == 'D':
+                        home_advantage += 0.5
+                else:
+                    if row['FT Result'] == 'A':
+                        home_advantage += 1
+                    elif row['FT Result'] == 'D':
+                        home_advantage += 0.5
+            
+            return home_advantage / len(matches)
+        
+        return calc_advantage(all_matches), calc_advantage(recent_matches)
+    
+    def extract_enhanced_features(self):
+        """Extract enhanced features for all matches"""
+        features = []
+        targets = []
+        
+        print("Extracting enhanced features from matches...")
+        
+        total_matches = len(self.df)
+        for i, row in self.df.iterrows():
+            if i % 1000 == 0:
+                print(f"Processing match {i}/{total_matches} ({i/total_matches*100:.1f}%)")
+            
+            home_team = row['HomeTeam']
+            away_team = row['AwayTeam']
+            date = row['Date']
+            
+            # Skip very early matches (need history for features)
+            early_matches = self.df[self.df['Date'] < date]
+            if len(early_matches) < 50:
+                continue
+            
+            # Calculate enhanced metrics
+            home_metrics = self.calculate_enhanced_team_metrics(home_team, date)
+            away_metrics = self.calculate_enhanced_team_metrics(away_team, date)
+            
+            # H2H metrics
+            h2h_overall, h2h_recent = self.calculate_enhanced_h2h_metrics(home_team, away_team, date)
+            
+            # Team strengths
+            home_strength = self.team_strengths.get(home_team, 0.5)
+            away_strength = self.team_strengths.get(away_team, 0.5)
+            strength_diff = home_strength - away_strength
+            
+            # Match context features
+            season_stage = self._get_season_stage(date)
+            match_importance = self._get_match_importance(home_team, away_team, date)
+            
+            # Create comprehensive feature vector
+            feature_vector = [
+                # Form metrics (different timeframes)
+                home_metrics.get('recent_form', 0.5),
+                away_metrics.get('recent_form', 0.5),
+                home_metrics.get('short_form', 0.5),
+                away_metrics.get('short_form', 0.5),
+                
+                # Scoring metrics
+                home_metrics.get('medium_goals_scored', 1.5),
+                home_metrics.get('medium_goals_conceded', 1.5),
+                away_metrics.get('medium_goals_scored', 1.5),
+                away_metrics.get('medium_goals_conceded', 1.5),
+                
+                # H2H
+                h2h_overall,
+                h2h_recent,
+                
+                # Shot metrics
+                home_metrics.get('medium_shots', 12),
+                away_metrics.get('medium_shots', 12),
+                home_metrics.get('medium_sot', 4),
+                away_metrics.get('medium_sot', 4),
+                
+                # Win/draw ratios
+                home_metrics.get('medium_wins_ratio', 0.33),
+                away_metrics.get('medium_wins_ratio', 0.33),
+                home_metrics.get('medium_draws_ratio', 0.33),
+                away_metrics.get('medium_draws_ratio', 0.33),
+                
+                # Goal differences
+                home_metrics.get('medium_goal_diff', 0),
+                away_metrics.get('medium_goal_diff', 0),
+                
+                # Defensive metrics
+                home_metrics.get('medium_clean_sheets', 0.3),
+                away_metrics.get('medium_clean_sheets', 0.3),
+                
+                # Both teams to score
+                home_metrics.get('medium_btts', 0.5),
+                away_metrics.get('medium_btts', 0.5),
+                
+                # Team strengths
+                home_strength,
+                away_strength,
+                strength_diff,
+                
+                # Recent form emphasis
+                home_metrics.get('recent_form', 0.5) * 1.2,  # Weight recent form more
+                away_metrics.get('recent_form', 0.5) * 1.2,
+                
+                # Venue-specific form
+                home_metrics.get('home_specific_form', 0.5),
+                away_metrics.get('away_specific_form', 0.5),
+                
+                # Attacking/defensive form
+                home_metrics.get('recent_goals_scored', 1.5) / max(home_metrics.get('medium_goals_scored', 1.5), 0.1),
+                away_metrics.get('recent_goals_scored', 1.5) / max(away_metrics.get('medium_goals_scored', 1.5), 0.1),
+                home_metrics.get('recent_goals_conceded', 1.5) / max(home_metrics.get('medium_goals_conceded', 1.5), 0.1),
+                away_metrics.get('recent_goals_conceded', 1.5) / max(away_metrics.get('medium_goals_conceded', 1.5), 0.1),
+                
+                # Context
+                match_importance,
+                season_stage
+            ]
+            
+            # Target
+            if row['FT Result'] == 'H':
+                target = 0
+            elif row['FT Result'] == 'D':
+                target = 1
+            else:
+                target = 2
+            
+            features.append(feature_vector)
+            targets.append(target)
+        
+        return np.array(features), np.array(targets)
+    
+    def _get_season_stage(self, date):
+        """Get season stage (0=early, 0.5=mid, 1=late)"""
+        month = date.month
+        if month in [8, 9, 10]:  # Early season
+            return 0.0
+        elif month in [11, 12, 1, 2]:  # Mid season
+            return 0.5
+        else:  # Late season
+            return 1.0
+    
+    def _get_match_importance(self, home_team, away_team, date):
+        """Estimate match importance (simplified)"""
+        # This could be enhanced with derby detection, league position difference, etc.
+        return 0.5
+    
+    def prepare_enhanced_data(self, test_size=0.2, validation_size=0.15):
+        """Prepare and split the enhanced data with feature selection"""
+        print("Preparing enhanced data...")
+        features, targets = self.extract_enhanced_features()
+        
+        # Remove invalid features
+        valid_indices = ~(np.isnan(features).any(axis=1) | np.isinf(features).any(axis=1))
+        features = features[valid_indices]
+        targets = targets[valid_indices]
+        
+        print(f"Valid samples: {len(features)}")
+        print(f"Class distribution: {Counter(targets)}")
+        
+        # Calculate class weights
+        self.class_weights = compute_class_weight(
+            'balanced', classes=np.unique(targets), y=targets
+        )
+        print(f"Class weights: {dict(zip([0, 1, 2], self.class_weights))}")
+        
+        # Feature selection
+        self.feature_selector.fit(features, targets)
+        features_selected = self.feature_selector.transform(features)
+        
+        selected_indices = self.feature_selector.get_support(indices=True)
+        print(f"Selected {len(selected_indices)} best features out of {len(self.feature_names)}")
+        
+        # Robust scaling
+        features_scaled = self.scaler.fit_transform(features_selected)
+        
+        # Stratified split
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=42)
+        train_idx, test_idx = next(sss.split(features_scaled, targets))
+        
+        X_train, X_test = features_scaled[train_idx], features_scaled[test_idx]
+        y_train, y_test = targets[train_idx], targets[test_idx]
+        
+        # Validation split
+        if validation_size > 0:
+            sss_val = StratifiedShuffleSplit(n_splits=1, test_size=validation_size/(1-test_size), random_state=42)
+            train_idx, val_idx = next(sss_val.split(X_train, y_train))
+            
+            X_val = X_train[val_idx]
+            y_val = y_train[val_idx]
+            X_train = X_train[train_idx]
+            y_train = y_train[train_idx]
+            
+            return X_train, X_val, X_test, y_train, y_val, y_test
+        
+        return X_train, X_test, y_train, y_test
+    
+    def create_enhanced_neat_config(self):
+        """Create enhanced NEAT configuration"""
+        num_features = self.feature_selector.k if hasattr(self.feature_selector, 'k') else 35
+        
+        config_text = f"""
+[NEAT]
+fitness_criterion     = max
+fitness_threshold     = 120
+pop_size              = 200
+reset_on_extinction   = False
+
+[DefaultGenome]
+# node activation options
+activation_default      = relu
+activation_mutate_rate  = 0.1
+activation_options      = sigmoid relu tanh leaky_relu
+
+# node aggregation options
+aggregation_default     = sum
+aggregation_mutate_rate = 0.05
+aggregation_options     = sum product max min mean
+
+# node bias options
+bias_init_mean          = 0.0
+bias_init_stdev         = 1.0
+bias_max_value          = 30.0
+bias_min_value          = -30.0
+bias_mutate_power       = 0.5
+bias_mutate_rate        = 0.7
+bias_replace_rate       = 0.1
+
+# genome compatibility options
+compatibility_disjoint_coefficient = 1.0
+compatibility_weight_coefficient   = 0.5
+
+# connection add/remove rates
+conn_add_prob           = 0.5
+conn_delete_prob        = 0.2
+
+# connection enable options
+enabled_default         = True
+enabled_mutate_rate     = 0.01
+
+feed_forward            = True
+initial_connection      = partial_nodirect 0.7
+
+# node add/remove rates
+node_add_prob           = 0.4
+node_delete_prob        = 0.2
+
+# network parameters
+num_hidden              = 0
+num_inputs              = {num_features}
+num_outputs             = 3
+
+# node response options
+response_init_mean      = 1.0
+response_init_stdev     = 0.0
+response_max_value      = 30.0
+response_min_value      = -30.0
+response_mutate_power   = 0.0
+response_mutate_rate    = 0.0
+response_replace_rate   = 0.0
+
+# connection weight options
+weight_init_mean        = 0.0
+weight_init_stdev       = 1.0
+weight_max_value        = 30
+weight_min_value        = -30
+weight_mutate_power     = 0.5
+weight_mutate_rate      = 0.8
+weight_replace_rate     = 0.1
+
+[DefaultSpeciesSet]
+compatibility_threshold = 3.0
+
+[DefaultStagnation]
+species_fitness_func = max
+max_stagnation       = 20
+species_elitism      = 4
+
+[DefaultReproduction]
+elitism            = 5
+survival_threshold = 0.2
+min_species_size   = 2
+"""
+        
+        config_path = 'enhanced_config.txt'
+        with open(config_path, 'w') as f:
+            f.write(config_text)
+        
+        return config_path
+    
+    def evaluate_enhanced_genome(self, genome, config, X_train, y_train, X_val=None, y_val=None):
+        """Enhanced genome evaluation with better fitness calculation"""
+        try:
+            net = neat.nn.FeedForwardNetwork.create(genome, config)
+            
+            # Training predictions with class weights
+            train_predictions = []
+            train_confidence = []
+            
+            for xi, yi in zip(X_train, y_train):
+                output = net.activate(xi)
+                # Apply softmax for better probability distribution
+                exp_output = np.exp(output - np.max(output))
+                probabilities = exp_output / np.sum(exp_output)
+                
+                prediction = np.argmax(probabilities)
+                confidence = np.max(probabilities)
+                
+                train_predictions.append(prediction)
+                train_confidence.append(confidence)
+            
+            # Weighted metrics
+            train_f1_weighted = f1_score(y_train, train_predictions, average='weighted', zero_division=0)
+            train_f1_macro = f1_score(y_train, train_predictions, average='macro', zero_division=0)
+            train_accuracy = accuracy_score(y_train, train_predictions)
+            
+            # Confidence bonus
+            avg_confidence = np.mean(train_confidence)
+            confidence_bonus = (avg_confidence - 0.33) * 10  # Above random guessing
+            
+            # Class balance penalty
+            pred_counter = Counter(train_predictions)
+            actual_counter = Counter(y_train)
+            
+            balance_penalty = 0
+            for class_id in [0, 1, 2]:
+                expected_ratio = actual_counter.get(class_id, 0) / len(y_train)
+                actual_ratio = pred_counter.get(class_id, 0) / len(train_predictions)
+                balance_penalty += abs(expected_ratio - actual_ratio) * 5
+            
+            # Complexity penalty
+            complexity_penalty = (len(genome.connections) * 0.01 + 
+                                len(genome.nodes) * 0.02)
+            
+            # Validation performance
+            val_bonus = 0
+            if X_val is not None and y_val is not None:
+                val_predictions = []
+                for xi in X_val:
+                    output = net.activate(xi)
+                    exp_output = np.exp(output - np.max(output))
+                    probabilities = exp_output / np.sum(exp_output)
+                    prediction = np.argmax(probabilities)
+                    val_predictions.append(prediction)
+                
+                val_f1 = f1_score(y_val, val_predictions, average='weighted', zero_division=0)
+                val_accuracy = accuracy_score(y_val, val_predictions)
+                val_bonus = (val_f1 * 30 + val_accuracy * 20)
+            
+            # Combined fitness with emphasis on F1 score
+            fitness = (train_f1_weighted * 100 +    # Main metric
+                      train_f1_macro * 50 +         # Macro F1 for balance
+                      train_accuracy * 30 +         # Accuracy bonus
+                      confidence_bonus +            # Confidence bonus
+                      val_bonus -                   # Validation bonus
+                      balance_penalty -             # Balance penalty
+                      complexity_penalty)           # Complexity penalty
+            
+            return max(fitness, 0.1)
+            
+        except Exception as e:
+            return 0.1
+    
+    def train_enhanced_neat(self, generations=150):
+        """Train the enhanced NEAT algorithm"""
+        print("Starting enhanced NEAT training...")
+        
+        # Prepare enhanced data
+        X_train, X_val, X_test, y_train, y_val, y_test = self.prepare_enhanced_data()
+        
+        # Store test data
+        self.X_test = X_test
+        self.y_test = y_test
+        
+        # Create enhanced config
+        config_path = self.create_enhanced_neat_config()
+        self.config = neat.Config(
+            neat.DefaultGenome, neat.DefaultReproduction,
+            neat.DefaultSpeciesSet, neat.DefaultStagnation,
+            config_path
+        )
+        
+        def eval_genomes(genomes, config):
+            for genome_id, genome in genomes:
+                fitness = self.evaluate_enhanced_genome(genome, config, X_train, y_train, X_val, y_val)
+                genome.fitness = fitness
+        
+        # Create population with larger size
+        population = neat.Population(self.config)
+        
+        # Add enhanced reporters
+        population.add_reporter(neat.StdOutReporter(True))
+        stats = neat.StatisticsReporter()
+        population.add_reporter(stats)
+        
+        # Checkpointing every 15 generations
+        checkpoint_reporter = neat.Checkpointer(generation_interval=15)
+        population.add_reporter(checkpoint_reporter)
+        
+        # Run evolution with more generations
+        self.best_genome = population.run(eval_genomes, generations)
+        
+        # Create the best network
+        self.best_net = neat.nn.FeedForwardNetwork.create(self.best_genome, self.config)
+        
+        # Save the best model
+        with open('best_enhanced_genome.pkl', 'wb') as f:
+            pickle.dump((self.best_genome, self.config, self.scaler, self.feature_selector), f)
+        
+        print("Enhanced training completed!")
+        return self.best_genome
+    
+    def evaluate_enhanced_model(self, X=None, y=None):
+        """Evaluate the enhanced trained model"""
+        if X is None or y is None:
+            X, y = self.X_test, self.y_test
+        
+        if self.best_net is None:
+            print("Model not trained yet!")
+            return None
+        
+        predictions = []
+        prediction_probs = []
+        confidences = []
+        
+        for xi in X:
+            output = self.best_net.activate(xi)
+            # Apply softmax
+            exp_output = np.exp(output - np.max(output))
+            probabilities = exp_output / np.sum(exp_output)
+            
+            prediction = np.argmax(probabilities)
+            confidence = np.max(probabilities)
+            
+            predictions.append(prediction)
+            prediction_probs.append(probabilities)
+            confidences.append(confidence)
+        
+        # Calculate comprehensive metrics
+        accuracy = accuracy_score(y, predictions)
+        f1_weighted = f1_score(y, predictions, average='weighted')
+        f1_macro = f1_score(y, predictions, average='macro')
+        f1_micro = f1_score(y, predictions, average='micro')
+        avg_confidence = np.mean(confidences)
+        
+        print(f"\n{'='*60}")
+        print(f"ENHANCED MODEL EVALUATION RESULTS")
+        print(f"{'='*60}")
+        print(f"Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
+        print(f"F1 Score (Weighted): {f1_weighted:.4f} ({f1_weighted*100:.2f}%)")
+        print(f"F1 Score (Macro): {f1_macro:.4f} ({f1_macro*100:.2f}%)")
+        print(f"F1 Score (Micro): {f1_micro:.4f} ({f1_micro*100:.2f}%)")
+        print(f"Average Confidence: {avg_confidence:.4f}")
+        
+        # Detailed classification report
+        target_names = ['Home Win', 'Draw', 'Away Win']
+        print(f"\nDetailed Classification Report:")
+        print(classification_report(y, predictions, target_names=target_names, digits=4))
+        
+        # Class-specific performance
+        print(f"\nClass-specific Performance:")
+        for i, class_name in enumerate(target_names):
+            class_mask = y == i
+            if np.sum(class_mask) > 0:
+                class_acc = accuracy_score(y[class_mask], np.array(predictions)[class_mask])
+                class_conf = np.mean([confidences[j] for j, pred in enumerate(predictions) if y[j] == i])
+                print(f"{class_name}: Accuracy={class_acc:.4f}, Avg Confidence={class_conf:.4f}")
+        
+        return {
+            'accuracy': accuracy,
+            'f1_weighted': f1_weighted,
+            'f1_macro': f1_macro,
+            'f1_micro': f1_micro,
+            'avg_confidence': avg_confidence,
+            'predictions': predictions,
+            'probabilities': prediction_probs,
+            'confidences': confidences
+        }
+    
+    def predict_match_enhanced(self, home_team, away_team, date=None):
+        """Enhanced match prediction with detailed analysis"""
+        if self.best_net is None:
+            print("Model not trained yet!")
+            return None
+        
+        if date is None:
+            date = self.df['Date'].max()
+        
+        print(f"\n{'='*50}")
+        print(f"MATCH PREDICTION: {home_team} vs {away_team}")
+        print(f"{'='*50}")
+        
+        # Calculate enhanced features
+        home_metrics = self.calculate_enhanced_team_metrics(home_team, date)
+        away_metrics = self.calculate_enhanced_team_metrics(away_team, date)
+        h2h_overall, h2h_recent = self.calculate_enhanced_h2h_metrics(home_team, away_team, date)
+        
+        # Team strengths
+        home_strength = self.team_strengths.get(home_team, 0.5)
+        away_strength = self.team_strengths.get(away_team, 0.5)
+        strength_diff = home_strength - away_strength
+        
+        # Context
+        season_stage = self._get_season_stage(date)
+        match_importance = self._get_match_importance(home_team, away_team, date)
+        
+        # Create feature vector (same as training)
+        feature_vector = [
+            home_metrics.get('recent_form', 0.5),
+            away_metrics.get('recent_form', 0.5),
+            home_metrics.get('short_form', 0.5),
+            away_metrics.get('short_form', 0.5),
+            home_metrics.get('medium_goals_scored', 1.5),
+            home_metrics.get('medium_goals_conceded', 1.5),
+            away_metrics.get('medium_goals_scored', 1.5),
+            away_metrics.get('medium_goals_conceded', 1.5),
+            h2h_overall,
+            h2h_recent,
+            home_metrics.get('medium_shots', 12),
+            away_metrics.get('medium_shots', 12),
+            home_metrics.get('medium_sot', 4),
+            away_metrics.get('medium_sot', 4),
+            home_metrics.get('medium_wins_ratio', 0.33),
+            away_metrics.get('medium_wins_ratio', 0.33),
+            home_metrics.get('medium_draws_ratio', 0.33),
+            away_metrics.get('medium_draws_ratio', 0.33),
+            home_metrics.get('medium_goal_diff', 0),
+            away_metrics.get('medium_goal_diff', 0),
+            home_metrics.get('medium_clean_sheets', 0.3),
+            away_metrics.get('medium_clean_sheets', 0.3),
+            home_metrics.get('medium_btts', 0.5),
+            away_metrics.get('medium_btts', 0.5),
+            home_strength,
+            away_strength,
+            strength_diff,
+            home_metrics.get('recent_form', 0.5) * 1.2,
+            away_metrics.get('recent_form', 0.5) * 1.2,
+            home_metrics.get('home_specific_form', 0.5),
+            away_metrics.get('away_specific_form', 0.5),
+            home_metrics.get('recent_goals_scored', 1.5) / max(home_metrics.get('medium_goals_scored', 1.5), 0.1),
+            away_metrics.get('recent_goals_scored', 1.5) / max(away_metrics.get('medium_goals_scored', 1.5), 0.1),
+            home_metrics.get('recent_goals_conceded', 1.5) / max(home_metrics.get('medium_goals_conceded', 1.5), 0.1),
+            away_metrics.get('recent_goals_conceded', 1.5) / max(away_metrics.get('medium_goals_conceded', 1.5), 0.1),
+            match_importance,
+            season_stage
+        ]
+        
+        # Feature selection and scaling
+        feature_vector_selected = self.feature_selector.transform([feature_vector])[0]
+        feature_vector_scaled = self.scaler.transform([feature_vector_selected])[0]
+        
+        # Make prediction
+        output = self.best_net.activate(feature_vector_scaled)
+        exp_output = np.exp(output - np.max(output))
+        probabilities = exp_output / np.sum(exp_output)
+        
+        prediction = np.argmax(probabilities)
+        confidence = np.max(probabilities)
+        
+        outcomes = ['Home Win', 'Draw', 'Away Win']
+        
+        # Display team analysis
+        print(f"\nTEAM ANALYSIS:")
+        print(f"{home_team} (Home):")
+        print(f"  Recent Form: {home_metrics.get('recent_form', 0.5):.3f}")
+        print(f"  Goals/Game: {home_metrics.get('medium_goals_scored', 1.5):.2f}")
+        print(f"  Goals Against: {home_metrics.get('medium_goals_conceded', 1.5):.2f}")
+        print(f"  Team Strength: {home_strength:.3f}")
+        print(f"  Home Form: {home_metrics.get('home_specific_form', 0.5):.3f}")
+        
+        print(f"\n{away_team} (Away):")
+        print(f"  Recent Form: {away_metrics.get('recent_form', 0.5):.3f}")
+        print(f"  Goals/Game: {away_metrics.get('medium_goals_scored', 1.5):.2f}")
+        print(f"  Goals Against: {away_metrics.get('medium_goals_conceded', 1.5):.2f}")
+        print(f"  Team Strength: {away_strength:.3f}")
+        print(f"  Away Form: {away_metrics.get('away_specific_form', 0.5):.3f}")
+        
+        print(f"\nHEAD-TO-HEAD:")
+        print(f"  Overall H2H Advantage (Home): {h2h_overall:.3f}")
+        print(f"  Recent H2H Advantage (Home): {h2h_recent:.3f}")
+        
+        print(f"\nPREDICTION:")
+        print(f"  Predicted Outcome: {outcomes[prediction]}")
+        print(f"  Confidence: {confidence:.1%}")
+        print(f"  Probabilities:")
+        print(f"    {home_team} Win: {probabilities[0]:.1%}")
+        print(f"    Draw: {probabilities[1]:.1%}")
+        print(f"    {away_team} Win: {probabilities[2]:.1%}")
+        
+        # Risk assessment
+        if confidence > 0.6:
+            risk = "Low"
+        elif confidence > 0.45:
+            risk = "Medium"
+        else:
+            risk = "High"
+        
+        print(f"  Risk Level: {risk}")
+        
+        return {
+            'prediction': prediction,
+            'outcome': outcomes[prediction],
+            'confidence': confidence,
+            'probabilities': probabilities.tolist(),
+            'risk_level': risk,
+            'home_metrics': home_metrics,
+            'away_metrics': away_metrics,
+            'h2h_metrics': {'overall': h2h_overall, 'recent': h2h_recent}
+        }
+    
+    def load_trained_model(self, model_path='best_enhanced_genome.pkl'):
+        """Load a pre-trained model"""
+        try:
+            with open(model_path, 'rb') as f:
+                self.best_genome, self.config, self.scaler, self.feature_selector = pickle.load(f)
+            
+            self.best_net = neat.nn.FeedForwardNetwork.create(self.best_genome, self.config)
+            print("Model loaded successfully!")
+            return True
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+
+# Usage example with enhanced features
+if __name__ == "__main__":
+    print("Initializing Enhanced Football Predictor...")
+    predictor = EnhancedFootballPredictor('England CSV.csv')
+    
+    print("Starting enhanced training...")
+    best_genome = predictor.train_enhanced_neat(generations=100)
+    
+    print("Evaluating enhanced model...")
+    results = predictor.evaluate_enhanced_model()
+    
+    # Check if target is met
+    if results and results['f1_weighted'] >= 0.75:
+        print(f"\n✅ SUCCESS! F1 Score of {results['f1_weighted']:.4f} exceeds the 75% target!")
+        print(f"   Accuracy: {results['accuracy']:.4f}")
+        print(f"   Average Confidence: {results['avg_confidence']:.4f}")
+    else:
+        f1_score = results['f1_weighted'] if results else 0
+        print(f"\n❌ F1 Score of {f1_score:.4f} is below the 75% target.")
+        print("Consider increasing training generations or fine-tuning parameters.")
+    
+    # Example predictions with enhanced analysis
+    if results and results['f1_weighted'] > 0.5:  # Only if model performs reasonably
+        print("\n" + "="*60)
+        print("ENHANCED EXAMPLE PREDICTIONS")
+        print("="*60)
+        
+        example_matches = [
+            ("Man United", "Liverpool"),
+            ("Chelsea", "Arsenal"),
+            ("Man City", "Tottenham")
+        ]
+        
+        for home, away in example_matches:
+            try:
+                predictor.predict_match_enhanced(home, away)
+                print("\n" + "-"*50)
+            except Exception as e:
+                print(f"Could not predict {home} vs {away}: {e}")
+                print("-"*50)
